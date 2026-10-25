@@ -1,0 +1,90 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+}
+enum Status {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  IGNORED
+}
+model User {
+  id String @id @default(uuid())
+  email String @unique
+  password String
+  createdAt DateTime @default(now())
+  sessions Session[]
+  projects Project[]
+}
+model Session {
+  hash String @id
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  @@index([expiresAt])
+}
+model Project {
+  id String @id @default(uuid())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name String
+  origins String[]
+  keyHash String @unique
+  keyPrefix String
+  createdAt DateTime @default(now())
+  issues Issue[]
+  events Event[]
+  @@index([userId])
+}
+model Issue {
+  id String @id @default(uuid())
+  projectId String
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  fingerprint String
+  name String
+  message String
+  status Status @default(OPEN)
+  count Int @default(1)
+  firstSeen DateTime @default(now())
+  lastSeen DateTime @default(now())
+  reopenedAt DateTime?
+  events Event[]
+  activities Activity[]
+  @@unique([projectId, fingerprint])
+  @@index([projectId, lastSeen])
+}
+model Event {
+  id String @id @default(uuid())
+  eventId String
+  projectId String
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  issueId String
+  issue Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  name String
+  message String
+  stack String?
+  url String?
+  environment String
+  release String?
+  sdkVersion String
+  clientTimestamp String?
+  userAgent String?
+  breadcrumbs Json
+  receivedAt DateTime @default(now())
+  @@unique([projectId, eventId])
+  @@index([issueId, receivedAt])
+  @@index([projectId, environment, receivedAt])
+}
+model Activity {
+  id String @id @default(uuid())
+  issueId String
+  issue Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  from Status?
+  to Status
+  reason String
+  createdAt DateTime @default(now())
+  @@index([issueId, createdAt])
+}
