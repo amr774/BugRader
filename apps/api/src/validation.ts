@@ -60,6 +60,15 @@ export const eventInput = z
 export const statusInput = z
   .object({ status: z.enum(["OPEN", "IN_PROGRESS", "RESOLVED", "IGNORED"]) })
   .strict();
+export const serverEventInput = eventInput
+  .omit({ url: true, userAgent: true, breadcrumbs: true })
+  .extend({
+    requestMethod: z
+      .enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+      .optional(),
+    routeTemplate: z.string().max(300).optional(),
+  })
+  .strict();
 export const listInput = z
   .object({
     projectId: z.string().uuid().optional(),
@@ -74,6 +83,6 @@ export const listInput = z
   })
   .strict()
   .refine(
-    (v) => !v.from || !v.to || v.from <= v.to,
+    (v) => !v.from || !v.to || Date.parse(v.from) <= Date.parse(v.to),
     "Start date must precede end date",
   );

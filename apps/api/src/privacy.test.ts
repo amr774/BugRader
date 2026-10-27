@@ -1,7 +1,31 @@
 import { describe, it, expect } from "vitest";
 import { cleanUrl, redact, fingerprint } from "./privacy";
-import { eventInput, projectInput } from "./validation";
+import { eventInput, projectInput, listInput } from "./validation";
 describe("privacy and limits", () => {
+  it("compares timestamp instants with different fractional precision", () => {
+    expect(
+      listInput.safeParse({
+        from: "2026-10-26T00:00:00Z",
+        to: "2026-10-26T00:00:00.500Z",
+      }).success,
+    ).toBe(true);
+    expect(
+      listInput.safeParse({
+        from: "2026-10-26T00:00:00.500Z",
+        to: "2026-10-26T00:00:00Z",
+      }).success,
+    ).toBe(false);
+  });
+  it("redacts complete JSON secrets containing escaped quotes", () => {
+    expect(
+      redact(
+        JSON.stringify({
+          password: 'prefix"SECRET_SUFFIX',
+          token: 'other\\"SECRET_SUFFIX',
+        }),
+      ),
+    ).not.toContain("SECRET_SUFFIX");
+  });
   it("strips URL credentials, query and fragment", () => {
     expect(cleanUrl("https://user:pass@example.com/a?token=abc#secret")).toBe(
       "https://example.com/a",

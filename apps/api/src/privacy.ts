@@ -15,13 +15,21 @@ export function cleanUrl(value: string): string {
   }
 }
 export function redact(value: string): string {
-  return value
-    .replace(/https?:\/\/[^\s<>"']+/gi, (u) => cleanUrl(u))
-    .replace(/\bBearer\s+[\w.~+\/-]+=*/gi, "Bearer [REDACTED]")
-    .replace(
-      /(["']?\b(?:password|passwd|secret|token|api[_-]?key|authorization|cookie|access_token|refresh_token)\b["']?\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;&}]+)/gi,
-      "$1[REDACTED]",
-    );
+  return (
+    value
+      .replace(/https?:\/\/[^\s<>"']+/gi, (u) => cleanUrl(u))
+      .replace(/\b(Bearer|Basic)\s+[\w.~+\/-]+=*/gi, "$1 [REDACTED]")
+      // Header lines can contain multiple cookie pairs; redact the whole value.
+      .replace(
+        /(^|\n)([ \t]*(?:authorization|proxy-authorization|cookie|set-cookie)[ \t]*:[ \t]*)[^\r\n]*/gi,
+        "$1$2[REDACTED]",
+      )
+      .replace(/\bbrs_[a-f0-9]{64}\b/gi, "[REDACTED]")
+      .replace(
+        /(["']?\b(?:password|passwd|secret|token|api[_-]?key|authorization|cookie|access_token|refresh_token)\b["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s,;&}]+)/gi,
+        "$1[REDACTED]",
+      )
+  );
 }
 export function fingerprint(name: string, message: string, stack = "") {
   // Preserve message values: IDs in messages may carry semantic meaning.

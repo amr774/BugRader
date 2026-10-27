@@ -23,13 +23,21 @@ export function sanitizeUrl(value: string) {
   }
 }
 export function redact(value: string) {
-  return value
-    .replace(/https?:\/\/[^\s<>"']+/gi, sanitizeUrl)
-    .replace(/\bBearer\s+[\w.~+\/-]+=*/gi, "Bearer [REDACTED]")
-    .replace(
-      /(["']?\b(?:password|passwd|secret|token|api[_-]?key|authorization|cookie|access_token|refresh_token)\b["']?\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;&}]+)/gi,
-      "$1[REDACTED]",
-    );
+  return (
+    value
+      .replace(/https?:\/\/[^\s<>"']+/gi, sanitizeUrl)
+      .replace(/\b(Bearer|Basic)\s+[\w.~+\/-]+=*/gi, "$1 [REDACTED]")
+      // Header lines can contain multiple cookie pairs; redact the whole value.
+      .replace(
+        /(^|\n)([ \t]*(?:authorization|proxy-authorization|cookie|set-cookie)[ \t]*:[ \t]*)[^\r\n]*/gi,
+        "$1$2[REDACTED]",
+      )
+      .replace(/\bbrs_[a-f0-9]{64}\b/gi, "[REDACTED]")
+      .replace(
+        /(["']?\b(?:password|passwd|secret|token|api[_-]?key|authorization|cookie|access_token|refresh_token)\b["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s,;&}]+)/gi,
+        "$1[REDACTED]",
+      )
+  );
 }
 export function serialize(value: unknown): string {
   try {
@@ -78,6 +86,18 @@ type EventPayload = {
   breadcrumbs: Breadcrumb[];
 };
 type Pending = { payload: EventPayload; attempt: number };
+function eventId(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  // randomUUID requires a secure context; getRandomValues also supports
+  // ordinary HTTP applications accepted by the project's origin allowlist.
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64;
+  bytes[8] = (bytes[8] & 63) | 128;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(
+    "",
+  );
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 let options: Options | undefined;
 let crumbs: Breadcrumb[] = [];
 let queue: Pending[] = [];
@@ -97,7 +117,15 @@ function schedule(delay = 0) {
   if (!timer && options)
     timer = setTimeout(() => {
       timer = undefined;
-      void send();
+      const current = generation;
+      void send().catch(() => {
+        // Even failures before fetch (e.g. unavailable AbortController) must not
+        // become unhandled rejections or recursively report SDK errors.
+        if (current !== generation) return;
+        running = false;
+        queue.shift();
+        schedule();
+      });
     }, delay);
 }
 async function send() {
@@ -150,7 +178,7 @@ function capture(error: unknown) {
     }
     const isError = error instanceof Error;
     const payload: EventPayload = {
-      eventId: crypto.randomUUID(),
+      eventId: eventId(),
       name:
         redact(isError ? error.name : "UnhandledRejection").slice(0, 160) ||
         "Error",

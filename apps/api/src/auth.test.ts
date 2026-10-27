@@ -1,6 +1,24 @@
 import { describe, it, expect, vi } from "vitest";
-import { rateLimit, passwordHash, passwordMatches } from "./auth";
+import {
+  rateLimit,
+  passwordHash,
+  passwordMatches,
+  cookieOptions,
+} from "./auth";
 describe("authentication and admission controls", () => {
+  it("uses secure, HTTP-only, same-site cookies in production", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    try {
+      expect(cookieOptions()).toEqual({
+        secure: true,
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   it("hashes with independent salts and verifies passwords", async () => {
     const a = await passwordHash("correct-long-password");
     const b = await passwordHash("correct-long-password");

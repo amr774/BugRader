@@ -16,6 +16,43 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe("browser SDK", () => {
+  it("sends valid unique event IDs when randomUUID is unavailable", async () => {
+    const getRandomValues = crypto.getRandomValues.bind(crypto);
+    vi.stubGlobal("crypto", { getRandomValues });
+    BugRadar.init(config);
+    BugRadar.captureException(new Error("first"));
+    BugRadar.captureException(new Error("second"));
+    await vi.runAllTimersAsync();
+    const ids = vi
+      .mocked(fetch)
+      .mock.calls.map((c) => JSON.parse(String(c[1]?.body)).eventId);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+    ids.forEach((id) =>
+      expect(id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      ),
+    );
+  });
+  it("redacts complete JSON secrets containing escaped quotes", () => {
+    expect(
+      redact(JSON.stringify({ password: 'prefix"SECRET_SUFFIX' })),
+    ).not.toContain("SECRET_SUFFIX");
+  });
+  it("isolates asynchronous SDK setup failures from the host", async () => {
+    vi.stubGlobal(
+      "AbortController",
+      class {
+        constructor() {
+          throw new Error("unavailable");
+        }
+      },
+    );
+    BugRadar.init(config);
+    BugRadar.captureException(new Error("host error"));
+    await vi.runAllTimersAsync();
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it("keeps multibyte payloads within the request byte budget", async () => {
     BugRadar.init(config);
     for (let n = 0; n < 30; n++)

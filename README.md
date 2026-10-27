@@ -1,5 +1,9 @@
 # BugRadar
 
+Latest functional audit, real browser results, fixes, and remaining limits: [FUNCTIONAL-AUDIT.md](FUNCTIONAL-AUDIT.md). Earlier hardening results: [HARDENING.md](HARDENING.md).
+
+NestJS SDK, Arabic/English, and theme verification: [EXTENSION-VERIFICATION.md](EXTENSION-VERIFICATION.md).
+
 A runnable, single-owner error monitoring MVP: React + TypeScript + Vite, NestJS, PostgreSQL + Prisma, and a framework-independent browser SDK. No Redis, external account, or paid service is required.
 
 ## Quick start
@@ -10,11 +14,11 @@ Use Node.js **22.12+ or 24 LTS**, npm, and PostgreSQL 16+. Run commands from the
 npm ci
 ```
 
-Copy `apps/api/.env.example` to `apps/api/.env` and `apps/web/.env.example` to `apps/web/.env`. On PowerShell:
+For a fresh setup, copy `apps/api/.env.example` to `apps/api/.env` and `apps/web/.env.example` to `apps/web/.env`. Preserve existing environment files and databases. On PowerShell:
 
 ```powershell
-Copy-Item apps/api/.env.example apps/api/.env
-Copy-Item apps/web/.env.example apps/web/.env
+if (!(Test-Path apps/api/.env)) { Copy-Item apps/api/.env.example apps/api/.env }
+if (!(Test-Path apps/web/.env)) { Copy-Item apps/web/.env.example apps/web/.env }
 ```
 
 Choose ONE database option:
@@ -51,6 +55,20 @@ npm run dev
 Open **http://localhost:5173** (use `localhost`, consistently). The API runs at **http://localhost:3001**. Register a new account with a password of at least 12 characters, create a project, and copy its public ingestion key. Ordinary new accounts start empty.
 
 `npm run dev` watches the SDK, API, and web app. Build once before starting so the SDK exports exist. To run the compiled API separately: `npm run start -w @bugradar/api`. Deploy `apps/web/dist` behind a static server with SPA fallback to `index.html`.
+
+Start PostgreSQL and wait until it accepts connections **before** starting the API. If PostgreSQL was still recovering when the API started, restart `npm run dev` once the database is ready. Stop development watchers before running `npm ci` on Windows. `db:setup` uses `prisma migrate deploy`; it does not reset the database.
+
+For the already-prepared Windows checkout used during verification, preserve its existing `.env` files. Its isolated cluster is on port **55432**. Check/start it with:
+
+```powershell
+& 'C:\Program Files\PostgreSQL\18\bin\pg_isready.exe' -h 127.0.0.1 -p 55432 -U bugradar
+# Only if it is not running:
+& 'C:\Program Files\PostgreSQL\18\bin\pg_ctl.exe' -D "$env:LOCALAPPDATA\BugRadar-dev-postgres" -l "$env:LOCALAPPDATA\BugRadar-dev-postgres.log" -o '-h 127.0.0.1 -p 55432' start
+# Wait for pg_isready to report accepting connections, then:
+npm run dev
+```
+
+The log path above is outside the data directory to avoid Windows file-sharing delays during PostgreSQL recovery. Other machines should use database option A or B above.
 
 ## Configuration
 
@@ -144,8 +162,19 @@ npm run build
 npm run typecheck
 npm test
 npm run test:integration
+npm run test:server
+npm run test:audit
 npm audit
 ```
+
+To retain all integration test records for inspection (used for the hardening run):
+
+```powershell
+$env:KEEP_TEST_DATA = '1'
+npm run test:integration
+```
+
+The integration command builds both SDK and API. In addition to ordinary ingestion, it uses the actual SDK against the real API/PostgreSQL with a DOM event harness. One transport-fault test deliberately discards the first response **after the API commits**, then checks that the SDK retries the same ID and the database count remains one. The harness is not a browser-engine or visual UI test. HTTP rate-limit checks run against the isolated test API on port 3099; project quota aggregation is tested at the real ingestion-service/database boundary with distinct client identities. No database reset is used. With `KEEP_TEST_DATA=1`, even test accounts are retained.
 
 Integration tests require the migrated database configured by `apps/api/.env` and free port **3099**. They start the compiled API, create uniquely named test users, and delete only those users (and their cascading data) in cleanup. Use a development database. They cover cookie auth, CSRF/origin checks, cross-user denial, public key rejection/rotation, origin validation, payload limits, concurrent grouping, retry idempotency, reopening, ignored issues, filtered aggregates, pagination, redaction, and logout. SDK unit tests cover listener lifecycle, queue/breadcrumb bounds, transient retries, permanent errors, deduplication, and failure isolation.
 
@@ -156,8 +185,11 @@ apps/web                  React UI, auth, projects, issues, demo
 apps/api/src              NestJS HTTP API, auth, ingestion, query handlers
 apps/api/prisma            Schema, checked-in migration, explicit seed
 packages/browser-sdk      Browser capture + optional React boundary
+packages/nestjs-sdk        NestJS HTTP exception filter + bounded server transport
+apps/nest-demo             Separate development-only monitored backend
 
 Browser SDK → POST /ingest → validate/redact → PostgreSQL transaction
+NestJS SDK → POST /ingest/server → server credential → same transaction
 Dashboard → cookie-authenticated API → owner-scoped PostgreSQL queries
 ```
 
@@ -182,3 +214,59 @@ Issue lists aggregate matching occurrences in SQL, so environment/date filters a
 - Optional web fonts are loaded from Google Fonts; system-font fallbacks keep the UI usable offline.
 
 These are an MVP's boundaries, not hidden placeholder features.
+
+## NestJS backend monitoring
+
+This is separate from the monitoring API. No crash endpoint was added to `apps/api`.
+
+1. Run the normal quick-start commands above. In **Projects → your project → NestJS SDK**, create a private server credential and copy it immediately. Existing browser keys and allowed origins are unchanged.
+2. For your own backend, build this monorepo and install `npm install /absolute/path/to/bugradar/packages/nestjs-sdk`. Follow the module example in [the NestJS package README](packages/nestjs-sdk/README.md), or copy the project-settings snippet. This local package is not published to npm.
+3. For the included demo, prepare its environment without overwriting an existing file:
+
+```powershell
+if (!(Test-Path apps/nest-demo/.env)) { Copy-Item apps/nest-demo/.env.example apps/nest-demo/.env }
+```
+
+Edit `apps/nest-demo/.env` and set:
+
+```dotenv
+BUGRADAR_ENDPOINT=http://localhost:3001/ingest/server
+BUGRADAR_SERVER_KEY=PASTE_YOUR_PRIVATE_SERVER_CREDENTIAL
+BUGRADAR_ENVIRONMENT=development
+BUGRADAR_RELEASE=nest-demo-1.0.0
+PORT=3010
+```
+
+Then, in another terminal from the repository root:
+
+```powershell
+npm run build -w @bugradar/nestjs-sdk
+npm run demo:server
+```
+
+Open [demo health](http://localhost:3010/health), then [intentional 500](http://localhost:3010/error). The 500 response is expected. In [Issues](http://localhost:5173/issues), click Refresh and find `Intentional NestJS demo failure`, with source **Server**. Its detail shows a stack trace, `GET`, `/error`, environment/release, SDK version, and timestamps. Resolve it, open `/error` again, and refresh: it should reopen with count +1. An ignored issue should retain its status while its count increases.
+
+[Ordinary 400](http://localhost:3010/bad-request) returns a custom JSON response and should create no event. [Explicit 503](http://localhost:3010/http-error) preserves its custom JSON response and creates an event. The demo binds to loopback and refuses `NODE_ENV=production`. The monitoring API remains on port 3001. Restart the demo after changing its environment or rotating its credential.
+
+The server endpoint requires `X-BugRadar-Server-Key`, rejects browser Origin headers, and uses the same 32 KB limit, validation, redaction, per-IP/project limits and transactional consistency as browser ingestion. Server keys cannot authenticate dashboard reads. Server and browser fingerprints are separated. Event IDs are unique per project; replays do not increase counts or reopen issues. The additive migration marks existing events/issues as Browser and leaves existing credentials, origins and records intact. If Prisma generation reports a locked DLL on Windows, stop the API watcher, run `npm run db:generate`, then restart it; do not reset the database.
+
+`npm run test:server` builds the SDK/API/demo and starts temporary real HTTP services on **3098** and **3012**, using the PostgreSQL database in `apps/api/.env`. It removes only its uniquely named verification accounts and cascading data by default; set KEEP_TEST_DATA=1 to retain them. It checks private credential ownership/hash storage/rotation, read denial, origin checks, atomic grouping/replays, source separation, statuses, limits/redaction, actual Nest 4xx/5xx HTTP responses, and a lost response after real commit followed by an SDK retry. Ports must be free. This is a real backend integration test; it is not a dashboard browser test.
+
+## Language and appearance
+
+Language and theme selectors are available above authentication and inside the app. English and Arabic translations use i18next/react-i18next; Arabic sets `lang=ar` and `dir=rtl`, with Tahoma/Segoe UI fallback. The saved `bugradar.language` preference wins; otherwise Arabic browser locales select Arabic, and other locales fall back to English. Dates/numbers use the active locale. Enums and database contents stay language-independent; API errors have stable codes. Raw errors, URLs, keys, commands and stack traces are kept in their original content with LTR isolation.
+
+The `bugradar.theme` preference supports `dark`, `light`, and `system` (default). System mode follows OS changes. A synchronous head script restores language, direction and theme before React renders. Both themes use shared semantic CSS variables with keyboard focus and separate status colors. Switches work when storage is unavailable, but cannot persist then. Local storage contains preferences only, never server credentials. Existing session data and in-progress forms are not intentionally reset by changing appearance.
+
+### Manual browser checklist
+
+Real browser verification succeeded on October 26, 2026; see FUNCTIONAL-AUDIT.md for the tested journeys and limits. Use this checklist to repeat the checks on your own browser:
+
+- Open [dashboard](http://localhost:5173/), register/login and create a project with allowed origin `http://localhost:5173`. Its initially empty states should provide setup guidance.
+- At [browser SDK demo](http://localhost:5173/demo), paste the **public browser key**, connect, then trigger uncaught error and unhandled rejection. Refresh Issues: real details should appear. Repeated occurrences should add five to one group. Resolve and repeat to reopen; ignore and repeat to retain Ignored.
+- Run the Nest demo above with the **private server key**. Confirm the server issue appears separately and its request context excludes query strings.
+- Test English/light, English/dark, Arabic/light and Arabic/dark at desktop and mobile widths (for example 1440 px and 390 px). Check auth, navigation, projects/settings, issue tables, traces, filters, statuses, scrolling and copy/rotation controls. RTL navigation/forms should mirror; code and traces should stay LTR.
+- Enter a partial project name, change language/theme, and verify the draft and route remain. Reload: saved preferences should return. System mode should react to the OS appearance setting.
+- Stop only the API while keeping the frontend running: loading should finish with a localized error and retry action. Restart it and retry. Invalid input, wrong login credentials and an empty issue filter should show localized feedback.
+
+The additional `npm run test:audit` suite uses real PostgreSQL and a temporary API on port **3097**. It checks exact overview aggregates, search/sorting/pagination, redaction, deterministic activity ordering, project edit/delete and credential revocation, and session expiry. It always removes only the accounts created by that run.

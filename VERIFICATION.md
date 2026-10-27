@@ -1,5 +1,7 @@
 # Verification record
 
+This is the original implementation verification. See [HARDENING.md](HARDENING.md) for the subsequent hardening run, its fixes, expanded checks, and the fresh browser-verification blocker.
+
 Checks performed against this implementation on Windows with Node.js 24.14.0 and a real PostgreSQL 18 database:
 
 | Check | Result |

@@ -1,21 +1,48 @@
 export const API =
   (import.meta as unknown as { env: Record<string, string> }).env
     .VITE_API_URL ?? "http://localhost:3001";
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+  ) {
+    super(message);
+  }
+}
+export const SESSION_EXPIRED = "bugradar:session-expired";
 export async function api<T = any>(
   path: string,
   method = "GET",
   body?: unknown,
 ): Promise<T> {
-  const res = await fetch(API + path, {
-    method,
-    credentials: "include",
-    headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = await res
-    .json()
-    .catch(() => ({ message: "The server returned an invalid response" }));
-  if (!res.ok) throw new Error(data.message ?? "Request failed");
+  let res: Response;
+  try {
+    res = await fetch(API + path, {
+      signal: AbortSignal.timeout(15000),
+      method,
+      credentials: "include",
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    throw new ApiError(
+      (e as Error).name === "TimeoutError"
+        ? "REQUEST_TIMEOUT"
+        : "NETWORK_ERROR",
+      0,
+    );
+  }
+  const data = await res.json().catch(() => ({ code: "INVALID_RESPONSE" }));
+  if (
+    res.status === 401 &&
+    !path.startsWith("/auth/") &&
+    typeof window !== "undefined"
+  )
+    window.dispatchEvent(new Event(SESSION_EXPIRED));
+  if (data === null || typeof data !== "object")
+    throw new ApiError("INVALID_RESPONSE", res.status);
+  if (!res.ok || data.code === "INVALID_RESPONSE")
+    throw new ApiError(data.code ?? "INTERNAL_ERROR", res.status);
   return data;
 }
 export type Project = {
@@ -23,10 +50,12 @@ export type Project = {
   name: string;
   origins: string[];
   keyPrefix: string;
+  serverKeyPrefix?: string;
   key?: string;
   _count?: { issues: number; events: number };
 };
 export type Issue = {
+  source: "BROWSER" | "SERVER";
   id: string;
   name: string;
   message: string;
@@ -41,6 +70,9 @@ export type Issue = {
   reopenedAt?: string;
 };
 export type Occurrence = {
+  source: "BROWSER" | "SERVER";
+  requestMethod?: string;
+  routeTemplate?: string;
   id: string;
   message: string;
   stack?: string;

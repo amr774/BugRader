@@ -9,9 +9,11 @@
   },
   "dependencies": {
     "@bugradar/browser-sdk": "*",
+    "i18next": "^26.5.11",
     "lucide-react": "^0.468.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
+    "react-i18next": "^17.1.9",
     "react-router-dom": "^7.9.0"
   },
   "devDependencies": {

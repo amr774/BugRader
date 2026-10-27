@@ -10,13 +10,17 @@
   },
   "scripts": {
     "dev": "concurrently -k -n sdk,api,web \"npm run dev -w @bugradar/browser-sdk\" \"npm run dev -w @bugradar/api\" \"npm run dev -w @bugradar/web\"",
-    "build": "npm run build -w @bugradar/browser-sdk && npm run build -w @bugradar/api && npm run build -w @bugradar/web",
+    "build": "npm run build -w @bugradar/browser-sdk && npm run build -w @bugradar/nestjs-sdk && npm run build -w @bugradar/api && npm run build -w @bugradar/nest-demo && npm run build -w @bugradar/web",
     "typecheck": "npm run typecheck --workspaces",
     "test": "vitest run",
-    "test:integration": "npm run build -w @bugradar/api && node --env-file=apps/api/.env --import tsx apps/api/test/integration.ts",
+    "test:integration": "npm run build -w @bugradar/browser-sdk && npm run build -w @bugradar/api && node --env-file=apps/api/.env --import tsx apps/api/test/integration.ts",
     "db:generate": "npm run db:generate -w @bugradar/api",
     "db:setup": "npm run db:setup -w @bugradar/api",
-    "db:seed": "npm run db:seed -w @bugradar/api"
+    "db:seed": "npm run db:seed -w @bugradar/api",
+    "demo:server": "npm run dev -w @bugradar/nest-demo",
+    "test:server": "npm run build -w @bugradar/nestjs-sdk && npm run build -w @bugradar/api && npm run build -w @bugradar/nest-demo && node --env-file=apps/api/.env --import tsx apps/api/test/server-integration.ts",
+    "pretest": "npm run build -w @bugradar/nestjs-sdk",
+    "test:audit": "npm run build -w @bugradar/api && node --env-file=apps/api/.env --import tsx apps/api/test/functional-audit.ts"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",

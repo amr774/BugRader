@@ -13,6 +13,7 @@ import {
   Res,
   UnauthorizedException,
   ConflictException,
+  ForbiddenException,
 } from "@nestjs/common";
 import type { Request, Response } from "express";
 import { Prisma } from "@prisma/client";
@@ -39,6 +40,7 @@ const publicProject = {
   name: true,
   origins: true,
   keyPrefix: true,
+  serverKeyPrefix: true,
   createdAt: true,
 } as const;
 const newKey = () => "br_" + randomBytes(32).toString("hex");
@@ -205,6 +207,39 @@ export class ApiController {
       req.ip ?? "unknown",
     );
   }
+  @Post("projects/:id/rotate-server-key") async rotateServer(
+    @Param("id") id: string,
+    @Req() req: Request,
+  ) {
+    const owner = await userId(req);
+    await ownedProject(id, owner);
+    const serverKey = "brs_" + randomBytes(32).toString("hex");
+    const project = await db.project.update({
+      where: { id, userId: owner },
+      data: {
+        serverKeyHash: hash(serverKey),
+        serverKeyPrefix: serverKey.slice(0, 12),
+      },
+      select: publicProject,
+    });
+    return { ...project, serverKey };
+  }
+  @Post("ingest/server") @HttpCode(202) async receiveServer(
+    @Body() body: unknown,
+    @Req() req: Request,
+  ) {
+    if (req.headers.origin !== undefined)
+      throw new ForbiddenException(
+        "Server ingestion does not accept browser origins",
+      );
+    return ingest(
+      String(req.headers["x-bugradar-server-key"] ?? ""),
+      undefined,
+      body,
+      req.ip ?? "unknown",
+      "SERVER",
+    );
+  }
   @Get("overview") async overview(@Req() req: Request) {
     const owner = await userId(req);
     const where = { project: { userId: owner } };
@@ -236,7 +271,7 @@ export class ApiController {
     if (q.environment) filters.push(Prisma.sql`e.environment=${q.environment}`);
     if (q.from) filters.push(Prisma.sql`e."receivedAt">=${new Date(q.from)}`);
     if (q.to) filters.push(Prisma.sql`e."receivedAt"<=${new Date(q.to)}`);
-    const base = Prisma.sql`SELECT i.id,i.name,i.message,i.status,i."projectId",p.name AS "projectName",count(e.id)::int AS count,min(e."receivedAt") AS "firstSeen",max(e."receivedAt") AS "lastSeen",array_agg(DISTINCT e.environment) AS environments FROM "Issue" i JOIN "Project" p ON p.id=i."projectId" JOIN "Event" e ON e."issueId"=i.id WHERE ${Prisma.join(filters, " AND ")} GROUP BY i.id,p.name`;
+    const base = Prisma.sql`SELECT i.id,i.name,i.message,i.status,i.source,i."projectId",p.name AS "projectName",count(e.id)::int AS count,min(e."receivedAt") AS "firstSeen",max(e."receivedAt") AS "lastSeen",array_agg(DISTINCT e.environment) AS environments FROM "Issue" i JOIN "Project" p ON p.id=i."projectId" JOIN "Event" e ON e."issueId"=i.id WHERE ${Prisma.join(filters, " AND ")} GROUP BY i.id,p.name`;
     const order =
       q.sort === "count"
         ? Prisma.sql`count DESC,"lastSeen" DESC,id`
@@ -309,15 +344,18 @@ export class ApiController {
     await ownedIssue(id, owner);
     const q = listInput.parse(query);
     const where = { issueId: id, issue: { project: { userId: owner } } };
-    const [items, total] = await db.$transaction([
-      db.activity.findMany({
-        where,
-        orderBy: { createdAt: "desc" },
-        skip: (q.page - 1) * q.limit,
-        take: q.limit,
-      }),
-      db.activity.count({ where }),
-    ]);
+    const [items, total] = await db.$transaction(
+      [
+        db.activity.findMany({
+          where,
+          orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+          skip: (q.page - 1) * q.limit,
+          take: q.limit,
+        }),
+        db.activity.count({ where }),
+      ],
+      { isolationLevel: "RepeatableRead" },
+    );
     return { items, total, page: q.page, limit: q.limit };
   }
   @Patch("issues/:id/status") async status(

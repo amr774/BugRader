@@ -33,6 +33,8 @@ import {
 import { BugRadar } from "@bugradar/browser-sdk";
 import {
   api,
+  ApiError,
+  SESSION_EXPIRED,
   API,
   type Project,
   type Issue,
@@ -40,14 +42,23 @@ import {
   type Page,
 } from "./api";
 import "./styles.css";
-const date = (v?: string) => (v ? new Date(v).toLocaleString() : "—");
-const number = (v: number) => v.toLocaleString();
+import { ScrollToTop } from "./ScrollToTop";
+import { t, locale } from "./i18n";
+import { useTranslation } from "react-i18next";
+import { Appearance } from "./Appearance";
+import { ServerSetup } from "./ServerSetup";
+import "./themes.css";
+const date = (v?: string) =>
+  v && Number.isFinite(Date.parse(v))
+    ? new Date(v).toLocaleString(locale())
+    : "—";
+const number = (v: number) => v.toLocaleString(locale());
 const statuses = ["OPEN", "IN_PROGRESS", "RESOLVED", "IGNORED"];
-const label = (s: string) => s.replaceAll("_", " ").toLowerCase();
+const label = (s: string) => t(s);
 function ErrorBox({ error }: { error: string }) {
   return error ? (
     <div className="notice error" role="alert">
-      {error}
+      {t(error)}
     </div>
   ) : null;
 }
@@ -63,6 +74,16 @@ function Empty({
       <Radar size={35} />
       <h3>{title}</h3>
       <p>{children}</p>
+    </div>
+  );
+}
+function Retry({ error, onRetry }: { error: string; onRetry: () => void }) {
+  return (
+    <div className="panel-body">
+      <ErrorBox error={error} />
+      <button className="secondary" onClick={onRetry}>
+        {t("Retry")}{" "}
+      </button>
     </div>
   );
 }
@@ -89,7 +110,7 @@ function CopyButton({ text }: { text: string }) {
       }}
     >
       {state === "Copied" ? <Check size={14} /> : <Copy size={14} />}{" "}
-      {state || "Copy"}
+      {t(state || "Copy")}
     </button>
   );
 }
@@ -107,9 +128,13 @@ function Pager({
   return (
     <div className="pager">
       <span>
-        {total === 0
-          ? "No results"
-          : `${(page - 1) * limit + 1}–${Math.min(page * limit, total)} of ${number(total)}`}
+        {total === 0 || (page - 1) * limit >= total
+          ? t("No results on this page")
+          : t("Pagination range", {
+              start: number((page - 1) * limit + 1),
+              end: number(Math.min(page * limit, total)),
+              total: number(total),
+            })}
       </span>
       <div>
         <button
@@ -117,15 +142,17 @@ function Pager({
           disabled={page <= 1}
           onClick={() => onChange(page - 1)}
         >
-          Previous
+          {t("Previous")}{" "}
         </button>
-        <span>Page {page}</span>
+        <span>
+          {t("Page")} {number(page)}
+        </span>
         <button
           className="secondary small"
           disabled={page * limit >= total}
           onClick={() => onChange(page + 1)}
         >
-          Next
+          {t("Next")}{" "}
         </button>
       </div>
     </div>
@@ -141,6 +168,7 @@ function useLoad<T>(path: string) {
     let active = true;
     setLoading(true);
     setError("");
+    setData(undefined);
     api<T>(path)
       .then((d) => {
         if (active) setData(d);
@@ -158,20 +186,100 @@ function useLoad<T>(path: string) {
   return { data, error, loading, reload };
 }
 function App() {
+  const { i18n } = useTranslation();
+  useEffect(() => {
+    const validate = (event: Event) => {
+      const input = event.target;
+      if (!(
+        input instanceof HTMLInputElement ||
+        input instanceof HTMLTextAreaElement
+      ))
+        return;
+      input.setCustomValidity("");
+      if (input.validity.valueMissing)
+        input.setCustomValidity(t("FIELD_REQUIRED"));
+      else if (input.validity.typeMismatch)
+        input.setCustomValidity(t("EMAIL_INVALID"));
+      else if (input.validity.tooShort)
+        input.setCustomValidity(t("PASSWORD_SHORT"));
+      else if (!input.validity.valid)
+        input.setCustomValidity(t("INVALID_INPUT"));
+    };
+    const clear = (event: Event) => {
+      const input = event.target;
+      if (
+        input instanceof HTMLInputElement ||
+        input instanceof HTMLTextAreaElement
+      )
+        input.setCustomValidity("");
+    };
+    document
+      .querySelectorAll("input,textarea")
+      .forEach((input) => (input as HTMLInputElement).setCustomValidity(""));
+    document.addEventListener("invalid", validate, true);
+    document.addEventListener("input", clear, true);
+    return () => {
+      document.removeEventListener("invalid", validate, true);
+      document.removeEventListener("input", clear, true);
+    };
+  }, [i18n.language]);
   const [user, setUser] = useState<{ email: string } | null>();
   const [error, setError] = useState("");
+  const [sessionAttempt, setSessionAttempt] = useState(0);
   useEffect(() => {
-    api("/auth/me")
-      .then(setUser)
-      .catch(() => setUser(null));
+    const expired = () => {
+      setUser(null);
+      setError("");
+    };
+    window.addEventListener(SESSION_EXPIRED, expired);
+    return () => window.removeEventListener(SESSION_EXPIRED, expired);
   }, []);
+  useEffect(() => {
+    let active = true;
+    setError("");
+    api("/auth/me")
+      .then((value) => {
+        if (active) setUser(value);
+      })
+      .catch((e) => {
+        if (!active) return;
+        if (e instanceof ApiError && e.status === 401) setUser(null);
+        else
+          setError(
+            "Unable to reach your workspace. Check that the API is running and try again.",
+          );
+      });
+    return () => {
+      active = false;
+    };
+  }, [sessionAttempt]);
   if (user === undefined)
     return (
-      <div className="boot">
-        <Radar /> Loading BugRadar…
-      </div>
+      <>
+        <Appearance />
+        <div className="boot">
+          {error ? (
+            <div>
+              <ErrorBox error={error} />
+              <button onClick={() => setSessionAttempt((v) => v + 1)}>
+                {t("Retry connection")}{" "}
+              </button>
+            </div>
+          ) : (
+            <>
+              <Radar /> {t("Loading BugRadar…")}{" "}
+            </>
+          )}
+        </div>
+      </>
     );
-  if (!user) return <Auth onAuth={setUser} />;
+  if (!user)
+    return (
+      <>
+        <Appearance />
+        <Auth onAuth={setUser} />
+      </>
+    );
   return (
     <div className="shell">
       <aside className="sidebar">
@@ -179,47 +287,47 @@ function App() {
           <span className="brand-icon">
             <Radar size={24} />
           </span>
-          BugRadar<span className="beta">BETA</span>
+          {t("BugRadar")} <span className="beta">{t("BETA")} </span>
         </Link>
         <div className="workspace">
-          <span className="avatar">P</span>
+          <span className="avatar">{t("P")} </span>
           <div>
-            Personal workspace<small>Developer workspace</small>
+            {t("Personal workspace")} <small>{t("Developer workspace")} </small>
           </div>
           <ShieldCheck size={16} />
         </div>
-        <div className="nav-caption">MONITOR</div>
+        <div className="nav-caption">{t("MONITOR")} </div>
         <nav>
           <NavLink to="/" end>
             <LayoutDashboard size={18} />
-            Overview
+            {t("Overview")}{" "}
           </NavLink>
           <NavLink to="/issues">
             <TriangleAlert size={18} />
-            Issues
+            {t("Issues")}{" "}
           </NavLink>
           <NavLink to="/projects">
             <FolderGit2 size={18} />
-            Projects
+            {t("Projects")}{" "}
           </NavLink>
           <NavLink to="/demo">
             <Code2 size={18} />
-            SDK playground
+            {t("SDK playground")}{" "}
           </NavLink>
         </nav>
         <div className="sidebar-note">
-          <span className="live-dot" /> Your errors. In focus.
-          <p>Connect an application to start catching what matters.</p>
+          <span className="live-dot" /> {t("Your errors. In focus.")}{" "}
+          <p>{t("Connect an application to start catching what matters.")} </p>
         </div>
         <div className="account">
           <span className="avatar purple">{user.email[0].toUpperCase()}</span>
           <div title={user.email}>
             {user.email}
-            <small>Personal account</small>
+            <small>{t("Personal account")} </small>
           </div>
           <button
             className="icon"
-            aria-label="Log out"
+            aria-label={t("Log out")}
             onClick={async () => {
               try {
                 await api("/auth/logout", "POST");
@@ -234,12 +342,13 @@ function App() {
         </div>
       </aside>
       <main>
+        <Appearance />
         <div className="topbar">
           <span>
-            <span className="live-dot" /> Error monitoring
+            <span className="live-dot" /> {t("Error monitoring")}{" "}
           </span>
           <span>
-            Personal workspace <ChevronRight size={14} />
+            {t("Personal workspace")} <ChevronRight size={14} />
           </span>
         </div>
         <div className="content">
@@ -254,15 +363,16 @@ function App() {
             <Route
               path="*"
               element={
-                <Empty title="Page not found">
-                  <Link to="/">Return to overview</Link>
+                <Empty title={t("Page not found")}>
+                  <Link to="/">{t("Return to overview")} </Link>
                 </Empty>
               }
             />
           </Routes>
         </div>
         <footer>
-          BugRadar <span>Built for the moments your code has other plans.</span>
+          {t("BugRadar")}{" "}
+          <span>{t("Built for the moments your code has other plans.")} </span>
         </footer>
       </main>
     </div>
@@ -297,17 +407,17 @@ function Auth({ onAuth }: { onAuth: (u: { email: string }) => void }) {
           <span className="brand-icon">
             <Radar />
           </span>
-          BugRadar
+          {t("BugRadar")}{" "}
         </div>
-        <span className="eyebrow">LESS NOISE. MORE SIGNAL.</span>
+        <span className="eyebrow">{t("LESS NOISE. MORE SIGNAL.")} </span>
         <h1>
-          Find the error.
-          <br />
-          <span>Get back to building.</span>
+          {t("Find the error.")} <br />
+          <span>{t("Get back to building.")} </span>
         </h1>
         <p>
-          A clear view of what breaks, where it happens, and what needs your
-          attention.
+          {t(
+            "A clear view of what breaks, where it happens, and what needs your attention.",
+          )}{" "}
         </p>
         <div className="signal-art" aria-hidden="true">
           <div />
@@ -318,30 +428,31 @@ function Auth({ onAuth }: { onAuth: (u: { email: string }) => void }) {
         </div>
         <div className="auth-features">
           <span>
-            <Activity size={17} /> Automatic error capture
+            <Activity size={17} /> {t("Automatic error capture")}{" "}
           </span>
           <span>
-            <FolderGit2 size={17} /> Intelligent issue grouping
+            <FolderGit2 size={17} /> {t("Intelligent issue grouping")}{" "}
           </span>
           <span>
-            <ShieldCheck size={17} /> Your projects, private
+            <ShieldCheck size={17} /> {t("Your projects, private")}{" "}
           </span>
         </div>
       </section>
       <section className="auth-panel">
         <div className="auth-form">
-          <span className="eyebrow">YOUR DEVELOPER WORKSPACE</span>
-          <h2>{register ? "Start catching errors" : "Welcome back"}</h2>
+          <span className="eyebrow">{t("YOUR DEVELOPER WORKSPACE")} </span>
+          <h2>{register ? t("Start catching errors") : t("Welcome back")}</h2>
           <p>
             {register
-              ? "Create your account. Connect your first project."
-              : "Sign in to see what needs your attention."}
+              ? t("Create your account. Connect your first project.")
+              : t("Sign in to see what needs your attention.")}
           </p>
           <form onSubmit={submit}>
             <label>
-              Email address
+              {t("Email address")}{" "}
               <input
                 name="email"
+                dir="ltr"
                 type="email"
                 placeholder="you@company.com"
                 required
@@ -350,11 +461,11 @@ function Auth({ onAuth }: { onAuth: (u: { email: string }) => void }) {
               />
             </label>
             <label>
-              Password
+              {t("Password")}{" "}
               <input
                 name="password"
                 type="password"
-                placeholder="At least 12 characters"
+                placeholder={t("At least 12 characters")}
                 required
                 minLength={12}
                 maxLength={128}
@@ -363,12 +474,16 @@ function Auth({ onAuth }: { onAuth: (u: { email: string }) => void }) {
             </label>
             <ErrorBox error={error} />
             <button disabled={busy}>
-              {busy ? "Please wait…" : register ? "Create account" : "Sign in"}
+              {busy
+                ? t("Please wait…")
+                : register
+                  ? t("Create account")
+                  : t("Sign in")}
               <ArrowRight size={16} />
             </button>
           </form>
           <p className="auth-switch">
-            {register ? "Already have an account?" : "New to BugRadar?"}{" "}
+            {register ? t("Already have an account?") : t("New to BugRadar?")}{" "}
             <button
               className="text-button"
               onClick={() => {
@@ -376,12 +491,12 @@ function Auth({ onAuth }: { onAuth: (u: { email: string }) => void }) {
                 setError("");
               }}
             >
-              {register ? "Sign in" : "Create an account"}
+              {register ? t("Sign in") : t("Create an account")}
             </button>
           </p>
           <div className="privacy-note">
-            <ShieldCheck size={17} /> Secure, HTTP-only cookie sessions. No
-            trackers.
+            <ShieldCheck size={17} />{" "}
+            {t("Secure, HTTP-only cookie sessions. No trackers.")}{" "}
           </div>
         </div>
       </section>
@@ -389,11 +504,13 @@ function Auth({ onAuth }: { onAuth: (u: { email: string }) => void }) {
   );
 }
 function Header({
+  raw = false,
   eyebrow,
   title,
   description,
   children,
 }: {
+  raw?: boolean;
   eyebrow: string;
   title: string;
   description: string;
@@ -403,8 +520,8 @@ function Header({
     <header className="page-heading">
       <div>
         <span className="eyebrow">{eyebrow}</span>
-        <h1>{title}</h1>
-        <p>{description}</p>
+        <h1 dir={raw ? "ltr" : undefined}>{title}</h1>
+        <p dir={raw ? "ltr" : undefined}>{description}</p>
       </div>
       <div className="heading-actions">{children}</div>
     </header>
@@ -416,10 +533,11 @@ function IssueTable({ items }: { items: Issue[] }) {
       <table>
         <thead>
           <tr>
-            <th>Issue</th>
-            <th>Status</th>
-            <th>Events</th>
-            <th>Last seen</th>
+            <th>{t("Issue")} </th>
+            <th>{t("Source")}</th>
+            <th>{t("Status")} </th>
+            <th>{t("Events")} </th>
+            <th>{t("Last seen")} </th>
             <th />
           </tr>
         </thead>
@@ -432,7 +550,7 @@ function IssueTable({ items }: { items: Issue[] }) {
                     <TriangleAlert size={16} />
                   </span>
                   <div>
-                    <strong>
+                    <strong dir="ltr">
                       {i.name}: {i.message}
                     </strong>
                     <small>
@@ -442,13 +560,17 @@ function IssueTable({ items }: { items: Issue[] }) {
                   </div>
                 </Link>
               </td>
+              <td>{t(i.source)}</td>
               <td>
                 <Badge status={i.status} />
               </td>
               <td className="mono">{number(i.count)}</td>
               <td className="muted nowrap">{date(i.lastSeen)}</td>
               <td>
-                <Link aria-label={`View ${i.message}`} to={`/issues/${i.id}`}>
+                <Link
+                  aria-label={`${t("View issue")}: ${i.message}`}
+                  to={`/issues/${i.id}`}
+                >
                   <ChevronRight size={17} />
                 </Link>
               </td>
@@ -471,9 +593,11 @@ function Overview() {
   return (
     <>
       <Header
-        eyebrow="WORKSPACE OVERVIEW"
-        title="A clearer picture of your apps."
-        description="Track errors, find the context, and keep moving forward."
+        eyebrow={t("WORKSPACE OVERVIEW")}
+        title={t("A clearer picture of your apps.")}
+        description={t(
+          "Track errors, find the context, and keep moving forward.",
+        )}
       >
         <button
           className="secondary"
@@ -483,41 +607,41 @@ function Overview() {
           }}
         >
           <RefreshCw size={15} />
-          Refresh
+          {t("Refresh")}{" "}
         </button>
         <Link className="button" to="/projects">
           <Plus size={16} />
-          New project
+          {t("New project")}{" "}
         </Link>
       </Header>
       <ErrorBox error={error} />
       <div className="stats">
         {[
           [
-            "Unresolved issues",
+            t("Unresolved issues"),
             data?.open,
             TriangleAlert,
-            "Needs your attention",
+            t("Needs your attention"),
           ],
           [
-            "Events · last 24 hours",
+            t("Events · last 24 hours"),
             data?.recent,
             Activity,
-            "Received by the server",
+            t("Received by the server"),
           ],
-          ["Total events", data?.events, Zap, "Across all your projects"],
+          [t("Total events"), data?.events, Zap, t("Across all your projects")],
           [
-            "Connected projects",
+            t("Connected projects"),
             data?.projects,
             FolderGit2,
-            "In your workspace",
+            t("In your workspace"),
           ],
         ].map(([title, value, Icon, note]) => {
           const I = Icon as typeof Activity;
           return (
             <article className="stat" key={String(title)}>
               <div>
-                {String(title)}
+                {t(String(title))}
                 <I size={17} />
               </div>
               <strong>
@@ -527,7 +651,7 @@ function Overview() {
                     ? "—"
                     : number(Number(value))}
               </strong>
-              <small>{String(note)}</small>
+              <small>{t(String(note))}</small>
             </article>
           );
         })}
@@ -535,22 +659,25 @@ function Overview() {
       <section className="panel">
         <div className="panel-heading">
           <div>
-            <h2>Recently seen issues</h2>
-            <p>The latest signals from your applications.</p>
+            <h2>{t("Recently seen issues")} </h2>
+            <p>{t("The latest signals from your applications.")} </p>
           </div>
           <Link className="text-link" to="/issues">
-            View all issues <ArrowRight size={15} />
+            {t("View all issues")} <ArrowRight size={15} />
           </Link>
         </div>
-        <ErrorBox error={recent.error} />
-        {recent.loading ? (
-          <p className="loading">Loading issues…</p>
+        {recent.error ? (
+          <Retry error={recent.error} onRetry={recent.reload} />
+        ) : recent.loading ? (
+          <p className="loading">{t("Loading issues…")} </p>
         ) : recent.data?.items.length ? (
           <IssueTable items={recent.data.items} />
         ) : (
-          <Empty title="All quiet on your radar">
-            Create a project and install the SDK to receive your first error.{" "}
-            <Link to="/projects">Set up a project →</Link>
+          <Empty title={t("All quiet on your radar")}>
+            {t(
+              "Create a project and install the SDK to receive your first error.",
+            )}{" "}
+            <Link to="/projects">{t("Set up a project →")} </Link>
           </Empty>
         )}
       </section>
@@ -559,15 +686,15 @@ function Overview() {
           <Code2 size={25} />
         </span>
         <div>
-          <h3>From an exception to an answer.</h3>
+          <h3>{t("From an exception to an answer.")} </h3>
           <p>
-            Connect the lightweight browser SDK, then use the playground to send
-            a real event.
+            {t(
+              "Connect the lightweight browser SDK, then use the playground to send a real event.",
+            )}{" "}
           </p>
         </div>
         <Link className="secondary button" to="/demo">
-          Open playground
-          <ArrowRight size={16} />
+          {t("Open playground")} <ArrowRight size={16} />
         </Link>
       </div>
     </>
@@ -597,18 +724,18 @@ function Filters({
           <label className="search-field">
             <Search size={16} />
             <input
-              aria-label="Search issues"
-              placeholder="Search error messages…"
+              aria-label={t("Search issues")}
+              placeholder={t("Search error messages…")}
               value={params.get("search") ?? ""}
               onChange={(e) => update("search", e.target.value)}
             />
           </label>
           <select
-            aria-label="Project"
+            aria-label={t("Project")}
             value={params.get("projectId") ?? ""}
             onChange={(e) => update("projectId", e.target.value)}
           >
-            <option value="">All projects</option>
+            <option value="">{t("All projects")} </option>
             {projects?.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
@@ -616,11 +743,11 @@ function Filters({
             ))}
           </select>
           <select
-            aria-label="Status"
+            aria-label={t("Status")}
             value={params.get("status") ?? ""}
             onChange={(e) => update("status", e.target.value)}
           >
-            <option value="">All statuses</option>
+            <option value="">{t("All statuses")} </option>
             {statuses.map((s) => (
               <option key={s} value={s}>
                 {label(s)}
@@ -630,13 +757,13 @@ function Filters({
         </>
       )}
       <input
-        aria-label="Environment"
-        placeholder="Environment"
+        aria-label={t("Environment")}
+        placeholder={t("Environment")}
         value={params.get("environment") ?? ""}
         onChange={(e) => update("environment", e.target.value)}
       />
       <label className="date-filter">
-        From
+        {t("From")}{" "}
         <input
           type="date"
           value={params.get("from")?.slice(0, 10) ?? ""}
@@ -649,7 +776,7 @@ function Filters({
         />
       </label>
       <label className="date-filter">
-        To
+        {t("To")}{" "}
         <input
           type="date"
           value={params.get("to")?.slice(0, 10) ?? ""}
@@ -663,12 +790,12 @@ function Filters({
       </label>
       {withStatus && (
         <select
-          aria-label="Sort by"
+          aria-label={t("Sort by")}
           value={params.get("sort") ?? "lastSeen"}
           onChange={(e) => update("sort", e.target.value)}
         >
-          <option value="lastSeen">Last seen</option>
-          <option value="count">Most frequent</option>
+          <option value="lastSeen">{t("Last seen")} </option>
+          <option value="count">{t("Most frequent")} </option>
         </select>
       )}
       {params.size > 0 && (
@@ -676,7 +803,7 @@ function Filters({
           className="text-button"
           onClick={() => setParams(new URLSearchParams())}
         >
-          Clear filters
+          {t("Clear filters")}{" "}
         </button>
       )}
     </div>
@@ -689,36 +816,45 @@ function Issues() {
   return (
     <>
       <Header
-        eyebrow="ISSUE EXPLORER"
-        title="Give every error a resolution."
-        description="Group the noise. Investigate the exceptions that matter."
+        eyebrow={t("ISSUE EXPLORER")}
+        title={t("Give every error a resolution.")}
+        description={t(
+          "Group the noise. Investigate the exceptions that matter.",
+        )}
       >
         <button className="secondary" onClick={result.reload}>
           <RefreshCw size={15} />
-          Refresh
+          {t("Refresh")}{" "}
         </button>
       </Header>
       <Filters params={params} setParams={setParams} projects={projects.data} />
       <p className="filter-note">
-        Counts and first/last seen use matching occurrences. Dates are UTC;
-        status is the current issue status.
+        {t(
+          "Counts and first/last seen use matching occurrences. Dates are UTC; status is the current issue status.",
+        )}{" "}
       </p>
-      <ErrorBox error={result.error || projects.error} />
+      <ErrorBox error={projects.error} />
       <section className="panel">
         <div className="panel-heading">
           <h2>
-            Issues{" "}
-            <span className="count-pill">{result.data?.total ?? "—"}</span>
+            {t("Issues")}{" "}
+            <span className="count-pill">
+              {result.data ? number(result.data.total) : "—"}
+            </span>
           </h2>
-          <span className="muted">Server-side filtering</span>
+          <span className="muted">{t("Server-side filtering")} </span>
         </div>
-        {result.loading ? (
-          <p className="loading">Loading issues…</p>
+        {result.error ? (
+          <Retry error={result.error} onRetry={result.reload} />
+        ) : result.loading ? (
+          <p className="loading">{t("Loading issues…")} </p>
         ) : result.data?.items.length ? (
           <IssueTable items={result.data.items} />
         ) : (
-          <Empty title="No matching issues">
-            Try another filter, or send an error from your application.
+          <Empty title={t("No matching issues")}>
+            {t(
+              "Try another filter, or send an error from your application.",
+            )}{" "}
           </Empty>
         )}
         {result.data && (
@@ -766,31 +902,33 @@ function Projects() {
   return (
     <>
       <Header
-        eyebrow="YOUR APPLICATIONS"
-        title="One radar. Every project."
-        description="Keep each application's errors and configuration in one place."
+        eyebrow={t("YOUR APPLICATIONS")}
+        title={t("One radar. Every project.")}
+        description={t(
+          "Keep each application's errors and configuration in one place.",
+        )}
       >
         <button onClick={() => setShow(!show)}>
           <Plus size={16} />
-          {show ? "Close form" : "New project"}
+          {show ? t("Close form") : t("New project")}
         </button>
       </Header>
-      <ErrorBox error={result.error || error} />
+      <ErrorBox error={error} />
       {show && (
         <section className="panel form-panel">
-          <h2>Create a project</h2>
+          <h2>{t("Create a project")} </h2>
           <form onSubmit={submit}>
             <label>
-              Project name
+              {t("Project name")}{" "}
               <input
                 name="name"
-                placeholder="e.g. storefront-web"
+                placeholder={t("e.g. storefront-web")}
                 required
                 maxLength={80}
               />
             </label>
             <label>
-              Allowed application origins
+              {t("Allowed application origins")}{" "}
               <textarea
                 name="origins"
                 rows={3}
@@ -799,11 +937,12 @@ function Projects() {
               />
             </label>
             <p className="muted">
-              One exact origin per line, including protocol and port. No paths,
-              wildcards, or trailing slashes.
+              {t(
+                "One exact origin per line, including protocol and port. No paths, wildcards, or trailing slashes.",
+              )}{" "}
             </p>
             <button disabled={busy}>
-              {busy ? "Creating…" : "Create project"}
+              {busy ? t("Creating…") : t("Create project")}
             </button>
           </form>
         </section>
@@ -811,7 +950,7 @@ function Projects() {
       {created?.key && <Setup project={created} rawKey={created.key} />}
       <div className="project-grid">
         {result.loading ? (
-          <p>Loading projects…</p>
+          <p>{t("Loading projects…")} </p>
         ) : (
           result.data?.map((p) => (
             <Link className="project-card" key={p.id} to={`/projects/${p.id}`}>
@@ -822,13 +961,15 @@ function Projects() {
                 <Settings size={18} />
               </div>
               <h2>{p.name}</h2>
-              <p>{p.origins[0]}</p>
+              <p dir="ltr">{p.origins[0]}</p>
               <div className="project-card-stats">
                 <span>
-                  <strong>{number(p._count?.issues ?? 0)}</strong>issues
+                  <strong>{number(p._count?.issues ?? 0)}</strong>
+                  {t("issues")}{" "}
                 </span>
                 <span>
-                  <strong>{number(p._count?.events ?? 0)}</strong>events
+                  <strong>{number(p._count?.events ?? 0)}</strong>
+                  {t("events")}{" "}
                 </span>
                 <ChevronRight size={18} />
               </div>
@@ -836,10 +977,12 @@ function Projects() {
           ))
         )}
       </div>
-      {!result.loading && !result.data?.length && (
-        <Empty title="Your first project starts here">
-          Create a project to get a public ingestion key and installation
-          instructions.
+      {result.error && <Retry error={result.error} onRetry={result.reload} />}
+      {!result.loading && !result.error && !result.data?.length && (
+        <Empty title={t("Your first project starts here")}>
+          {t(
+            "Create a project to get a public ingestion key and installation instructions.",
+          )}{" "}
         </Empty>
       )}
     </>
@@ -852,18 +995,25 @@ function Setup({ project, rawKey }: { project: Project; rawKey?: string }) {
     <section className="panel setup">
       <div className="panel-heading">
         <div>
-          <h2>Connect {project.name}</h2>
-          <p>Two small steps to your first event.</p>
+          <h2>
+            {t("Browser SDK")} · {t("Connect")} {project.name}
+          </h2>
+          <p>{t("Two small steps to your first event.")} </p>
         </div>
         <Code2 size={22} />
       </div>
       <div className="panel-body">
         <div className="notice">
-          This browser key is public and can only send events. It cannot read
-          your project data.{" "}
+          {t(
+            "This browser key is public and can only send events. It cannot read your project data.",
+          )}{" "}
           {rawKey
-            ? "Copy it now: the full key is revealed only at creation or rotation."
-            : "Only a hash is stored. Use your saved key or rotate it below."}
+            ? t(
+                "Copy it now: the full key is revealed only at creation or rotation.",
+              )
+            : t(
+                "Only a hash is stored. Use your saved key or rotate it below.",
+              )}
         </div>
         {rawKey && (
           <div className="key-display">
@@ -871,29 +1021,30 @@ function Setup({ project, rawKey }: { project: Project; rawKey?: string }) {
             <CopyButton text={rawKey} />
           </div>
         )}
-        <h3>1. Install the local SDK package</h3>
+        <h3>{t("1. Install the local SDK package")} </h3>
         <p className="muted">
-          Build the monorepo first, then replace the path below. The package is
-          not published to npm.
+          {t(
+            "Build the monorepo first, then replace the path below. The package is not published to npm.",
+          )}{" "}
         </p>
         <div className="code-header">
-          <span>Terminal</span>
+          <span>{t("Terminal")} </span>
           <CopyButton text={command} />
         </div>
         <pre>{command}</pre>
-        <h3>2. Initialize once, before your application renders</h3>
+        <h3>{t("2. Initialize once, before your application renders")} </h3>
         <div className="code-header">
-          <span>JavaScript / TypeScript</span>
+          <span>{t("JavaScript / TypeScript")} </span>
           <CopyButton text={snippet} />
         </div>
         <pre>{snippet}</pre>
         <p className="muted">
-          Allow your application's exact origin in settings. Redaction is
-          best-effort: never send passwords, tokens, or sensitive personal data.
-          Origin checks cannot stop forged requests from non-browser clients.
+          {t(
+            "Allow your application's exact origin in settings. Redaction is best-effort: never send passwords, tokens, or sensitive personal data. Origin checks cannot stop forged requests from non-browser clients.",
+          )}{" "}
         </p>
         <Link className="text-link" to="/demo">
-          Test the SDK in the playground <ArrowRight size={15} />
+          {t("Test the SDK in the playground")} <ArrowRight size={15} />
         </Link>
       </div>
     </section>
@@ -931,31 +1082,33 @@ function ProjectSettings() {
       setBusy(false);
     }
   }
-  if (result.loading) return <p className="loading">Loading project…</p>;
-  if (!result.data) return <ErrorBox error={result.error} />;
+  if (result.loading)
+    return <p className="loading">{t("Loading project…")} </p>;
+  if (!result.data)
+    return <Retry error={result.error} onRetry={result.reload} />;
   const project = result.data;
   return (
     <>
       <Link className="back" to="/projects">
         <ArrowLeft size={15} />
-        All projects
+        {t("All projects")}{" "}
       </Link>
       <Header
-        eyebrow="PROJECT SETTINGS"
+        eyebrow={t("PROJECT SETTINGS")}
         title={project.name}
-        description="Control your ingestion origins and SDK connection."
+        description={t("Control your ingestion origins and SDK connection.")}
       />
       <ErrorBox error={error} />
       {notice && (
         <div className="notice success" role="status">
-          {notice}
+          {t(notice)}
         </div>
       )}
       <section className="panel form-panel">
-        <h2>General configuration</h2>
+        <h2>{t("General configuration")} </h2>
         <form onSubmit={save}>
           <label>
-            Project name
+            {t("Project name")}{" "}
             <input
               name="name"
               defaultValue={project.name}
@@ -964,7 +1117,7 @@ function ProjectSettings() {
             />
           </label>
           <label>
-            Allowed application origins
+            {t("Allowed application origins")}{" "}
             <textarea
               name="origins"
               defaultValue={project.origins.join("\n")}
@@ -973,22 +1126,28 @@ function ProjectSettings() {
             />
           </label>
           <p className="muted">
-            One exact HTTP(S) origin per line. Use a separate project for
-            applications with different ownership.
+            {t(
+              "One exact HTTP(S) origin per line. Use a separate project for applications with different ownership.",
+            )}{" "}
           </p>
-          <button disabled={busy}>{busy ? "Saving…" : "Save changes"}</button>
+          <button disabled={busy}>
+            {busy ? t("Saving…") : t("Save changes")}
+          </button>
         </form>
       </section>
       <Setup project={project} rawKey={rawKey} />
+      <ServerSetup project={project} />
       <section className="panel form-panel">
-        <h2>Ingestion key</h2>
+        <h2>{t("Ingestion key")} </h2>
         <p className="muted">
-          Current key starts with <code>{project.keyPrefix}…</code>. Rotation
-          immediately invalidates the old key; update all SDK installations.
+          {t("Current key starts with")} <code>{project.keyPrefix}…</code>
+          {t(
+            ". Rotation immediately invalidates the old key; update all SDK installations.",
+          )}{" "}
         </p>
         {confirmRotate ? (
           <div className="inline">
-            <span>Invalidate the existing key?</span>
+            <span>{t("Invalidate the existing key?")} </span>
             <button
               disabled={busy}
               onClick={async () => {
@@ -1010,25 +1169,27 @@ function ProjectSettings() {
                 }
               }}
             >
-              Rotate now
+              {t("Rotate now")}{" "}
             </button>
             <button
               className="secondary"
               onClick={() => setConfirmRotate(false)}
             >
-              Cancel
+              {t("Cancel")}{" "}
             </button>
           </div>
         ) : (
           <button className="secondary" onClick={() => setConfirmRotate(true)}>
             <RefreshCw size={15} />
-            Rotate key
+            {t("Rotate key")}{" "}
           </button>
         )}
       </section>
       <section className="panel form-panel danger-zone">
-        <h2>Delete project</h2>
-        <p>Deletes all issues, occurrences, and activity permanently.</p>
+        <h2>{t("Delete project")} </h2>
+        <p>
+          {t("Deletes all issues, occurrences, and activity permanently.")}{" "}
+        </p>
         {confirmDelete ? (
           <div className="inline">
             <button
@@ -1046,18 +1207,18 @@ function ProjectSettings() {
                 }
               }}
             >
-              Permanently delete {project.name}
+              {t("Permanently delete")} {project.name}
             </button>
             <button
               className="secondary"
               onClick={() => setConfirmDelete(false)}
             >
-              Cancel
+              {t("Cancel")}{" "}
             </button>
           </div>
         ) : (
           <button className="danger" onClick={() => setConfirmDelete(true)}>
-            Delete project
+            {t("Delete project")}{" "}
           </button>
         )}
       </section>
@@ -1084,23 +1245,24 @@ function IssueDetail() {
   const [busy, setBusy] = useState(false);
   const event =
     events.data?.items.find((e) => e.id === selected) ?? events.data?.items[0];
-  if (issue.loading) return <p className="loading">Loading issue…</p>;
-  if (!issue.data) return <ErrorBox error={issue.error} />;
+  if (issue.loading) return <p className="loading">{t("Loading issue…")} </p>;
+  if (!issue.data) return <Retry error={issue.error} onRetry={issue.reload} />;
   const i = issue.data;
   return (
     <>
       <Link className="back" to="/issues">
         <ArrowLeft size={15} />
-        All issues
+        {t("All issues")}{" "}
       </Link>
       <Header
-        eyebrow={i.project?.name ?? "ISSUE DETAIL"}
+        eyebrow={i.project?.name ?? t("ISSUE DETAIL")}
         title={i.name}
+        raw
         description={i.message}
       >
         <Badge status={i.status} />
         <select
-          aria-label="Change issue status"
+          aria-label={t("Change issue status")}
           value={i.status}
           disabled={busy}
           onChange={async (e) => {
@@ -1134,44 +1296,50 @@ function IssueDetail() {
           }}
         >
           <RefreshCw size={15} />
-          Refresh
+          {t("Refresh")}{" "}
         </button>
       </Header>
-      <ErrorBox error={error || events.error || activity.error} />
+      <ErrorBox error={error} />
       <div className="issue-meta">
         <div>
-          <small>Total occurrences · all time</small>
+          <small>{t("Source")}</small>
+          <strong>{t(i.source)}</strong>
+        </div>
+        <div>
+          <small>{t("Total occurrences · all time")} </small>
           <strong>{number(i.count)}</strong>
         </div>
         <div>
-          <small>First seen · all time</small>
+          <small>{t("First seen · all time")} </small>
           <strong>{date(i.firstSeen)}</strong>
         </div>
         <div>
-          <small>Last seen · all time</small>
+          <small>{t("Last seen · all time")} </small>
           <strong>{date(i.lastSeen)}</strong>
         </div>
         {i.reopenedAt && (
           <div>
-            <small>Last reopened</small>
+            <small>{t("Last reopened")} </small>
             <strong>{date(i.reopenedAt)}</strong>
           </div>
         )}
       </div>
-      <h2 className="section-title">Occurrence explorer</h2>
+      <h2 className="section-title">{t("Occurrence explorer")} </h2>
       <Filters params={params} setParams={setParams} withStatus={false} />
       <p className="filter-note">
-        Matching occurrences: {events.data?.total ?? "—"} · First:{" "}
-        {date(events.data?.firstSeen)} · Last: {date(events.data?.lastSeen)}.
-        Date filters use UTC receipt time.
+        {t("Matching occurrences:")}{" "}
+        {events.data ? number(events.data.total) : "—"} {t("· First:")}{" "}
+        {date(events.data?.firstSeen)} {t("· Last:")}{" "}
+        {date(events.data?.lastSeen)}
+        {t(". Date filters use UTC receipt time.")}{" "}
       </p>
       <div className="detail-grid">
         <section className="panel occurrence-list">
           <div className="panel-heading">
-            <h2>Occurrences</h2>
+            <h2>{t("Occurrences")} </h2>
           </div>
           {events.loading ? (
-            <p className="loading">Loading…</p>
+            <p className="loading">{t("Loading…")} </p>
           ) : (
             events.data?.items.map((e) => (
               <button
@@ -1181,13 +1349,16 @@ function IssueDetail() {
               >
                 <strong>{date(e.receivedAt)}</strong>
                 <span>
-                  {e.environment} <i>·</i> {e.release || "No release"}
+                  {e.environment} <i>·</i> {e.release || t("No release")}
                 </span>
               </button>
             ))
           )}
-          {!events.loading && !events.data?.items.length && (
-            <p className="loading">No matching occurrences.</p>
+          {events.error && (
+            <Retry error={events.error} onRetry={events.reload} />
+          )}
+          {!events.loading && !events.error && !events.data?.items.length && (
+            <p className="loading">{t("No matching occurrences.")} </p>
           )}
           {events.data && (
             <Pager
@@ -1202,63 +1373,103 @@ function IssueDetail() {
         </section>
         <section className="panel">
           <div className="panel-heading">
-            <h2>Event context</h2>
+            <h2>{t("Event context")} </h2>
             <span className="muted">{event?.environment}</span>
           </div>
-          {event ? (
+          {events.loading ? (
+            <p className="loading">{t("Loading event context…")} </p>
+          ) : events.error ? (
+            <Retry error={events.error} onRetry={events.reload} />
+          ) : event ? (
             <div className="panel-body">
-              <h3>Stack trace</h3>
+              <h3>{t("Stack trace")} </h3>
               <pre className="stack">
-                {event.stack || "No stack trace available for this event."}
+                {event.stack || t("No stack trace available for this event.")}
               </pre>
               <dl className="event-facts">
-                <dt>Release</dt>
-                <dd>{event.release || "Not provided"}</dd>
-                <dt>Page URL</dt>
-                <dd>{event.url || "Not provided"}</dd>
-                <dt>Browser</dt>
-                <dd>{event.userAgent || "Not provided"}</dd>
-                <dt>SDK version</dt>
-                <dd>{event.sdkVersion}</dd>
-                <dt>Received at</dt>
+                <dt>{t("Release")} </dt>
+                <dd>{event.release || t("Not provided")}</dd>
+                {event.source === "SERVER" ? (
+                  <>
+                    <dt>{t("Request method")}</dt>
+                    <dd dir="ltr">
+                      {event.requestMethod || t("Not provided")}
+                    </dd>
+                    <dt>{t("Route template")}</dt>
+                    <dd dir="ltr">
+                      {event.routeTemplate || t("Not provided")}
+                    </dd>
+                  </>
+                ) : (
+                  <>
+                    <dt>{t("Page URL")} </dt>
+                    <dd dir="ltr">{event.url || t("Not provided")}</dd>
+                    <dt>{t("Browser")} </dt>
+                    <dd dir="ltr">{event.userAgent || t("Not provided")}</dd>
+                  </>
+                )}
+                <dt>{t("SDK version")} </dt>
+                <dd dir="ltr">{event.sdkVersion}</dd>
+                <dt>{t("Received at")} </dt>
                 <dd>{date(event.receivedAt)}</dd>
-                <dt>Client time (untrusted)</dt>
-                <dd>{event.clientTimestamp || "Not provided"}</dd>
+                <dt>
+                  {t(
+                    event.source === "SERVER"
+                      ? "Source time (untrusted)"
+                      : "Client time (untrusted)",
+                  )}{" "}
+                </dt>
+                <dd>
+                  {event.clientTimestamp
+                    ? date(event.clientTimestamp)
+                    : t("Not provided")}
+                </dd>
               </dl>
               <h3>
-                Breadcrumbs{" "}
-                <span className="count-pill">{event.breadcrumbs.length}</span>
+                {t("Breadcrumbs")}{" "}
+                <span className="count-pill">
+                  {number(event.breadcrumbs.length)}
+                </span>
               </h3>
               {event.breadcrumbs.length ? (
                 event.breadcrumbs.map((b, n) => (
                   <div className="breadcrumb" key={n}>
                     <code>{b.category}</code>
-                    <span>{b.message}</span>
-                    <small>{b.timestamp}</small>
+                    <span dir="ltr">{b.message}</span>
+                    <small>{date(b.timestamp)}</small>
                   </div>
                 ))
               ) : (
                 <p className="muted">
-                  No breadcrumbs were sent with this occurrence.
+                  {t("No breadcrumbs were sent with this occurrence.")}{" "}
                 </p>
               )}
             </div>
           ) : (
-            <Empty title="Select an occurrence">
-              Event details will appear here.
+            <Empty title={t("Select an occurrence")}>
+              {t("Event details will appear here.")}{" "}
             </Empty>
           )}
         </section>
       </div>
       <section className="panel activity-panel">
         <div className="panel-heading">
-          <h2>Issue activity</h2>
+          <h2>{t("Issue activity")} </h2>
         </div>
+        {activity.loading && (
+          <p className="loading">{t("Loading activity…")} </p>
+        )}
+        {activity.error && (
+          <Retry error={activity.error} onRetry={activity.reload} />
+        )}
+        {!activity.loading && !activity.error && activity.data?.total === 0 && (
+          <p className="loading">{t("No activity recorded.")} </p>
+        )}
         {activity.data?.items.map((a) => (
           <div className="activity-row" key={a.id}>
             <span className="activity-dot" />
             <div>
-              <strong>{a.reason}</strong>
+              <strong>{t(a.reason)}</strong>
               <small>
                 {a.from ? `${label(a.from)} → ` : ""}
                 {label(a.to)}
@@ -1313,17 +1524,20 @@ function Demo() {
   return (
     <>
       <Header
-        eyebrow="SDK PLAYGROUND"
-        title="Meet your next caught exception."
-        description="Send real events through the browser SDK and your ingestion API."
+        eyebrow={t("SDK PLAYGROUND")}
+        title={t("Meet your next caught exception.")}
+        description={t(
+          "Send real events through the browser SDK and your ingestion API.",
+        )}
       />
       <div className="notice">
-        Create a project with <code>{window.location.origin}</code> in its
-        origin allowlist. Paste its public ingestion key below. This page sends
-        real errors, including intentional console errors.
+        {t("Create a project with")} <code>{window.location.origin}</code>{" "}
+        {t(
+          "in its origin allowlist. Paste its public ingestion key below. This page sends real errors, including intentional console errors.",
+        )}{" "}
       </div>
       <section className="panel form-panel">
-        <h2>Connect the demo</h2>
+        <h2>{t("Connect the demo")} </h2>
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -1338,7 +1552,7 @@ function Demo() {
           }}
         >
           <label>
-            Public ingestion key
+            {t("Public ingestion key")}{" "}
             <input
               value={key}
               onChange={(e) => {
@@ -1346,13 +1560,14 @@ function Demo() {
                 setConnected(false);
                 BugRadar.destroy();
               }}
+              dir="ltr"
               placeholder="br_…"
               pattern="br_[a-f0-9]{64}"
               required
             />
           </label>
           <div className="inline">
-            <button>{connected ? "Reconnect SDK" : "Connect SDK"}</button>
+            <button>{connected ? t("Reconnect SDK") : t("Connect SDK")}</button>
             {connected && (
               <button
                 type="button"
@@ -1363,7 +1578,7 @@ function Demo() {
                   setNotice("SDK disconnected and listeners removed.");
                 }}
               >
-                Disconnect
+                {t("Disconnect")}{" "}
               </button>
             )}
           </div>
@@ -1371,27 +1586,30 @@ function Demo() {
       </section>
       {notice && (
         <div className="notice success" role="status">
-          {notice}
+          {t(notice)}
         </div>
       )}
       <div className="demo-grid">
         {[
-          ["Captured exception", "Send a TypeError with captureException()."],
           [
-            "Uncaught browser error",
-            "Throw from a timer and let the window listener catch it.",
+            t("Captured exception"),
+            t("Send a TypeError with captureException()."),
           ],
           [
-            "Unhandled rejection",
-            "Reject a promise with a structured non-Error value.",
+            t("Uncaught browser error"),
+            t("Throw from a timer and let the window listener catch it."),
           ],
           [
-            "Repeated occurrences",
-            "Send five distinct events with the same fingerprint.",
+            t("Unhandled rejection"),
+            t("Reject a promise with a structured non-Error value."),
+          ],
+          [
+            t("Repeated occurrences"),
+            t("Send five distinct events with the same fingerprint."),
           ],
         ].map(([title, description], n) => (
           <section className="panel demo-card" key={title}>
-            <span className="demo-number">0{n + 1}</span>
+            <span className="demo-number">{number(n + 1)}</span>
             <h2>{title}</h2>
             <p>{description}</p>
             <button
@@ -1400,14 +1618,13 @@ function Demo() {
               onClick={() => trigger(n)}
             >
               <Zap size={15} />
-              Trigger event{n === 3 ? "s" : ""}
+              {t(n === 3 ? "Trigger events" : "Trigger event")}
             </button>
           </section>
         ))}
       </div>
       <Link to="/issues" className="button">
-        View received issues
-        <ArrowRight size={16} />
+        {t("View received issues")} <ArrowRight size={16} />
       </Link>
     </>
   );
@@ -1415,6 +1632,7 @@ function Demo() {
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <BrowserRouter>
+      <ScrollToTop />
       <App />
     </BrowserRouter>
   </React.StrictMode>,

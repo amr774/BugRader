@@ -11,6 +11,10 @@ enum Status {
   RESOLVED
   IGNORED
 }
+enum EventSource {
+  BROWSER
+  SERVER
+}
 model User {
   id String @id @default(uuid())
   email String @unique
@@ -34,6 +38,8 @@ model Project {
   origins String[]
   keyHash String @unique
   keyPrefix String
+  serverKeyHash String? @unique
+  serverKeyPrefix String?
   createdAt DateTime @default(now())
   issues Issue[]
   events Event[]
@@ -44,6 +50,7 @@ model Issue {
   projectId String
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   fingerprint String
+  source EventSource @default(BROWSER)
   name String
   message String
   status Status @default(OPEN)
@@ -59,6 +66,9 @@ model Issue {
 model Event {
   id String @id @default(uuid())
   eventId String
+  source EventSource @default(BROWSER)
+  requestMethod String?
+  routeTemplate String?
   projectId String
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   issueId String
