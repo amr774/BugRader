@@ -147,7 +147,7 @@ export async function bootstrap() {
   app.useGlobalFilters(new Errors());
   app.enableShutdownHooks();
   await db.$connect();
-  await app.listen(Number(process.env.PORT ?? 3001), "127.0.0.1");
+  await app.listen(Number(process.env.PORT ?? 3001), process.env.HOST ?? "127.0.0.1");
   return app;
 }
 if (require.main === module)
